@@ -40,7 +40,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 const server = require('http').createServer(app);
 const io = require('socket.io')(server);
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3001;
 const qrcode = require('qrcode');
 
 app.use('/assets', express.static(__dirname + '/client/assets'));
@@ -109,7 +109,7 @@ async function connectToWhatsApp() {
             console.log('opened connection');
             // let groups = Object.values(await sock.groupFetchAllParticipating());
             // for (let group of groups) {
-            //     console.log('id_group: ' + group.id + ' || Nama Group: ' + group.subject);
+            //     console.log('Group ID: ' + group.id + ' || Nama Group: ' + group.subject);
             // }
             return;
         }
@@ -172,12 +172,16 @@ const updateQR = (data) => {
 app.post('/send-message', async (req, res) => {
     const reqMessage = req.body.message;
     const reqPhone = req.body.phone;
-    const reqFile = req.files;
-
     let whatsAppNumber;
+
     try {
         if (!req.files) {
-            if (!reqPhone) {
+            if (reqMessage == undefined) {
+                res.status(500).json({
+                    status: false,
+                    response: 'Body pesan belum disertakan!',
+                });
+            } else if (!reqPhone) {
                 res.status(500).json({
                     status: false,
                     response: 'Nomor WA belum tidak disertakan!',
@@ -222,10 +226,10 @@ app.post('/send-message', async (req, res) => {
                 });
             } else {
                 whatsAppNumber = '62' + reqPhone.substring(1) + '@s.whatsapp.net';
-                let file = req.files.file;
-                var changeFileName = new Date().getTime() + '_' + file.name;
-                file.mv('./uploads/' + changeFileName);
-                let reqFileMime = file.mimetype;
+                let reqFile = req.files.file;
+                var changeFileName = new Date().getTime() + '_' + reqFile.name;
+                reqFile.mv('./uploads/' + changeFileName);
+                let reqFileMime = reqFile.mimetype;
 
                 if (isConnected) {
                     const exists = await sock.onWhatsApp(whatsAppNumber);
@@ -262,9 +266,9 @@ app.post('/send-message', async (req, res) => {
                                         status: true,
                                         message: 'Success',
                                         data: {
-                                            name: file.name,
-                                            mimetype: file.mimetype,
-                                            size: file.size,
+                                            name: reqFile.name,
+                                            mimetype: reqFile.mimetype,
+                                            size: reqFile.size,
                                         },
                                     });
                                 })
@@ -300,9 +304,9 @@ app.post('/send-message', async (req, res) => {
                                         status: true,
                                         message: 'Success',
                                         data: {
-                                            name: file.name,
-                                            mimetype: file.mimetype,
-                                            size: file.size,
+                                            name: reqFile.name,
+                                            mimetype: reqFile.mimetype,
+                                            size: reqFile.size,
                                         },
                                     });
                                 })
@@ -321,7 +325,7 @@ app.post('/send-message', async (req, res) => {
                                         caption: reqMessage,
                                     },
                                     mimetype: reqFileMime,
-                                    changeFileName: file.name,
+                                    changeFileName: reqFile.name,
                                 })
                                 .then((result) => {
                                     if (fs.existsSync(fileName)) {
@@ -340,9 +344,9 @@ app.post('/send-message', async (req, res) => {
                                         status: true,
                                         message: 'Success',
                                         data: {
-                                            name: file.name,
-                                            mimetype: file.mimetype,
-                                            size: file.size,
+                                            name: reqFile.name,
+                                            mimetype: reqFile.mimetype,
+                                            size: reqFile.size,
                                         },
                                     });
                                 })
@@ -368,6 +372,230 @@ app.post('/send-message', async (req, res) => {
                 }
             }
         }
+    } catch (err) {
+        res.status(500).send(err);
+    }
+});
+
+// send group message
+app.post('/send-group-message', async (req, res) => {
+    const reqMessage = req.body.message;
+    const reqGroupId = req.body.group_id;
+    let whatsAppGroup;
+
+    try {
+        if (isConnected) {
+            if (!req.files) {
+                if (reqMessage == undefined) {
+                    res.status(500).json({
+                        status: false,
+                        response: 'Body pesan belum disertakan!',
+                    });
+                } else if (!reqGroupId) {
+                    res.status(500).json({
+                        status: false,
+                        response: 'Nomor Id Group belum disertakan!',
+                    });
+                } else {
+                    let whatsAppGroup = await sock.groupMetadata(reqGroupId);
+                    console.log(whatsAppGroup.id);
+                    console.log('isConnected');
+                    if (whatsAppGroup?.id || (whatsAppGroup && whatsAppGroup[0]?.id)) {
+                        sock.sendMessage(reqGroupId, { text: reqMessage })
+                            .then((result) => {
+                                res.status(200).json({
+                                    status: true,
+                                    response: result,
+                                });
+                                console.log('succes terkirim');
+                            })
+                            .catch((err) => {
+                                res.status(500).json({
+                                    status: false,
+                                    response: err,
+                                });
+                                console.log('error 500');
+                            });
+                    } else {
+                        res.status(500).json({
+                            status: false,
+                            response: `ID Group ${reqGroupId} tidak terdaftar.`,
+                        });
+                        console.log(`ID Group ${reqGroupId} tidak terdaftar.`);
+                    }
+                }
+            } else {
+                //console.log('Kirim document');
+                if (!reqGroupId) {
+                    res.status(500).json({
+                        status: false,
+                        response: 'Id Group tidak disertakan!',
+                    });
+                } else {
+                    whatsAppGroup = await sock.groupMetadata(reqGroupId);
+                    console.log(whatsAppGroup.id);
+
+                    let reqFile = req.files.file;
+                    var changeFileName = new Date().getTime() + '_' + reqFile.name;
+                    //pindahkan file ke dalam upload directory
+                    reqFile.mv('./uploads/' + changeFileName);
+                    let reqFileMime = reqFile.mimetype;
+                    //console.log('Simpan document '+reqFileMime);
+                    if (isConnected) {
+                        if (whatsAppGroup?.id || (whatsAppGroup && whatsAppGroup[0]?.id)) {
+                            let fileName = './uploads/' + changeFileName;
+                            let extensionName = path.extname(fileName);
+                            if (
+                                extensionName === '.jpeg' ||
+                                extensionName === '.jpg' ||
+                                extensionName === '.png' ||
+                                extensionName === '.gif'
+                            ) {
+                                await sock
+                                    .sendMessage(whatsAppGroup.id || whatsAppGroup[0].id, {
+                                        image: {
+                                            url: fileName,
+                                        },
+                                        caption: reqMessage,
+                                    })
+                                    .then((result) => {
+                                        if (fs.existsSync(fileName)) {
+                                            fs.unlink(fileName, (err) => {
+                                                if (err && err.code == 'ENOENT') {
+                                                    // file doens't exist
+                                                    console.info("File doesn't exist, won't remove it.");
+                                                } else if (err) {
+                                                    console.error('Error occurred while trying to remove file.');
+                                                }
+                                                //console.log('File deleted!');
+                                            });
+                                        }
+                                        res.send({
+                                            status: true,
+                                            message: 'Success',
+                                            data: {
+                                                name: reqFile.name,
+                                                mimetype: reqFile.mimetype,
+                                                size: reqFile.size,
+                                            },
+                                        });
+                                    })
+                                    .catch((err) => {
+                                        res.status(500).json({
+                                            status: false,
+                                            response: err,
+                                        });
+                                        console.log('pesan gagal terkirim');
+                                    });
+                            } else if (extensionName === '.mp3' || extensionName === '.ogg') {
+                                await sock
+                                    .sendMessage(whatsAppGroup.id || whatsAppGroup[0].id, {
+                                        audio: {
+                                            url: fileName,
+                                            caption: reqMessage,
+                                        },
+                                        mimetype: 'audio/mp4',
+                                    })
+                                    .then((result) => {
+                                        if (fs.existsSync(fileName)) {
+                                            fs.unlink(fileName, (err) => {
+                                                if (err && err.code == 'ENOENT') {
+                                                    // file doens't exist
+                                                    console.info("File doesn't exist, won't remove it.");
+                                                } else if (err) {
+                                                    console.error('Error occurred while trying to remove file.');
+                                                }
+                                                //console.log('File deleted!');
+                                            });
+                                        }
+                                        res.send({
+                                            status: true,
+                                            message: 'Success',
+                                            data: {
+                                                name: reqFile.name,
+                                                mimetype: reqFile.mimetype,
+                                                size: reqFile.size,
+                                            },
+                                        });
+                                    })
+                                    .catch((err) => {
+                                        res.status(500).json({
+                                            status: false,
+                                            response: err,
+                                        });
+                                        console.log('pesan gagal terkirim');
+                                    });
+                            } else {
+                                await sock
+                                    .sendMessage(whatsAppGroup.id || whatsAppGroup[0].id, {
+                                        document: {
+                                            url: fileName,
+                                            caption: reqMessage,
+                                        },
+                                        mimetype: reqFileMime,
+                                        fileName: reqFile.name,
+                                    })
+                                    .then((result) => {
+                                        if (fs.existsSync(fileName)) {
+                                            fs.unlink(fileName, (err) => {
+                                                if (err && err.code == 'ENOENT') {
+                                                    // file doens't exist
+                                                    console.info("File doesn't exist, won't remove it.");
+                                                } else if (err) {
+                                                    console.error('Error occurred while trying to remove file.');
+                                                }
+                                                //console.log('File deleted!');
+                                            });
+                                        }
+
+                                        setTimeout(() => {
+                                            sock.sendMessage(whatsAppGroup.id || whatsAppGroup[0].id, {
+                                                text: reqMessage,
+                                            });
+                                        }, 1000);
+
+                                        res.send({
+                                            status: true,
+                                            message: 'Success',
+                                            data: {
+                                                name: reqFile.name,
+                                                mimetype: reqFile.mimetype,
+                                                size: reqFile.size,
+                                            },
+                                        });
+                                    })
+                                    .catch((err) => {
+                                        res.status(500).json({
+                                            status: false,
+                                            response: err,
+                                        });
+                                        console.log('pesan gagal terkirim');
+                                    });
+                            }
+                        } else {
+                            res.status(500).json({
+                                status: false,
+                                response: `Nomor ${number} tidak terdaftar.`,
+                            });
+                        }
+                    } else {
+                        res.status(500).json({
+                            status: false,
+                            response: `WhatsApp belum terhubung.`,
+                        });
+                    }
+                }
+            }
+
+            //end is connected
+        } else {
+            res.status(500).json({
+                status: false,
+                response: `WhatsApp belum terhubung.`,
+            });
+        }
+
+        //end try
     } catch (err) {
         res.status(500).send(err);
     }
