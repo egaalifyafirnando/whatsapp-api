@@ -1,20 +1,11 @@
 const {
     default: makeWASocket,
-    MessageType,
-    MessageOptions,
-    Mimetype,
     DisconnectReason,
-    BufferJSON,
-    AnyMessageContent,
-    delay,
     fetchLatestBaileysVersion,
     isJidBroadcast,
-    makeCacheableSignalKeyStore,
     makeInMemoryStore,
-    MessageRetryMap,
     useMultiFileAuthState,
-    msgRetryCounterMap,
-} = require('@adiwajshing/baileys');
+} = require('@whiskeysockets/baileys');
 
 const log = (pino = require('pino'));
 const { session } = { session: 'baileys_auth_info' };
@@ -22,12 +13,13 @@ const { Boom } = require('@hapi/boom');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
-const https = require('https');
 const express = require('express');
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
+const socketIO = require('socket.io');
 const bodyParser = require('body-parser');
 const app = require('express')();
+const qrcode = require('qrcode');
 
 app.use(
     fileUpload({
@@ -38,10 +30,9 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-const server = require('http').createServer(app);
-const io = require('socket.io')(server);
+const server = http.createServer(app);
+const io = socketIO(server);
 const port = process.env.PORT || 3001;
-const qrcode = require('qrcode');
 
 app.use('/assets', express.static(__dirname + '/client/assets'));
 
@@ -70,7 +61,7 @@ async function connectToWhatsApp() {
         printQRInTerminal: true,
         auth: state,
         logger: log({ level: 'silent' }),
-        version: [2, 2323, 4],
+        version,
         shouldIgnoreJid: (jid) => isJidBroadcast(jid),
     });
     store.bind(sock.ev);
@@ -79,9 +70,9 @@ async function connectToWhatsApp() {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             let reason = new Boom(lastDisconnect.error).output.statusCode;
+
             if (reason === DisconnectReason.badSession) {
                 console.log(`Bad Session File, Please Delete ${session} and Scan Again`);
-                // sock.logout();
                 connectToWhatsApp();
             } else if (reason === DisconnectReason.connectionClosed) {
                 console.log('Connection closed, reconnecting....');
@@ -94,7 +85,6 @@ async function connectToWhatsApp() {
                 sock.logout();
             } else if (reason === DisconnectReason.loggedOut) {
                 console.log(`Device Logged Out, Please Delete ${session} and Scan Again.`);
-                // sock.logout();
                 connectToWhatsApp();
             } else if (reason === DisconnectReason.restartRequired) {
                 console.log('Restart Required, Restarting...');
