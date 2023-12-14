@@ -20,6 +20,7 @@ const socketIO = require('socket.io');
 const bodyParser = require('body-parser');
 const app = require('express')();
 const qrcode = require('qrcode');
+const env = require('dotenv').config();
 
 app.use(
     fileUpload({
@@ -48,16 +49,22 @@ app.get('/', (req, res) => {
     });
 });
 
-const store = makeInMemoryStore({ logger: pino().child({ level: 'silent', stream: 'store' }) });
+const store = makeInMemoryStore({
+    logger: pino().child({ level: 'silent', stream: 'store' }),
+});
 
 let sock;
 let qr;
 let soket;
+let conn;
 
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
+    const { state, saveCreds } = await useMultiFileAuthState(
+        'baileys_auth_info'
+    );
     let { version, isLatest } = await fetchLatestBaileysVersion();
     sock = makeWASocket({
+        keepAliveIntervalMs: 15000,
         printQRInTerminal: true,
         auth: state,
         logger: log({ level: 'silent' }),
@@ -71,36 +78,55 @@ async function connectToWhatsApp() {
         if (connection === 'close') {
             let reason = new Boom(lastDisconnect.error).output.statusCode;
 
-            if (reason === DisconnectReason.badSession) {
-                console.log(`Bad Session File, Please Delete ${session} and Scan Again`);
-                connectToWhatsApp();
-            } else if (reason === DisconnectReason.connectionClosed) {
-                console.log('Connection closed, reconnecting....');
-                connectToWhatsApp();
-            } else if (reason === DisconnectReason.connectionLost) {
-                console.log('Connection Lost from Server, reconnecting...');
-                connectToWhatsApp();
-            } else if (reason === DisconnectReason.connectionReplaced) {
-                console.log('Connection Replaced, Another New Session Opened, Please Close Current Session First');
-                sock.logout();
-            } else if (reason === DisconnectReason.loggedOut) {
-                console.log(`Device Logged Out, Please Delete ${session} and Scan Again.`);
-                connectToWhatsApp();
-            } else if (reason === DisconnectReason.restartRequired) {
-                console.log('Restart Required, Restarting...');
-                connectToWhatsApp();
-            } else if (reason === DisconnectReason.timedOut) {
-                console.log('Connection TimedOut, Reconnecting...');
-                connectToWhatsApp();
-            } else {
-                sock.end(`Unknown DisconnectReason: ${reason}|${lastDisconnect.error}`);
+            switch (reason) {
+                case DisconnectReason.badSession:
+                    console.log(
+                        `Bad Session File, Please Delete ${session} and Scan Again`
+                    );
+                    connectToWhatsApp();
+                    break;
+                case DisconnectReason.connectionClosed:
+                    console.log('Connection closed, reconnecting....');
+                    connectToWhatsApp();
+                    break;
+                case DisconnectReason.connectionLost:
+                    console.log('Connection Lost from Server, reconnecting...');
+                    connectToWhatsApp();
+                    break;
+                case DisconnectReason.connectionReplaced:
+                    console.log(
+                        'Connection Replaced, Another New Session Opened, Please Close Current Session First'
+                    );
+                    sock.logout();
+                    break;
+                case DisconnectReason.loggedOut:
+                    console.log(`Device Logged Out, Please Scan Again.`);
+                    const folderAuth = path.join(
+                        __dirname,
+                        'baileys_auth_info'
+                    );
+                    deleteFolderRecursive(folderAuth);
+                    conn = DisconnectReason.loggedOut;
+                    connectToWhatsApp();
+                    break;
+                case DisconnectReason.restartRequired:
+                    console.log('Restart Required, Restarting...');
+                    connectToWhatsApp();
+                    break;
+                case DisconnectReason.timedOut:
+                    console.log('Connection TimedOut, Reconnecting...');
+                    connectToWhatsApp();
+                    break;
+                default:
+                    sock.end(
+                        `Unknown DisconnectReason: ${reason}|${lastDisconnect.error}`
+                    );
+                    break;
             }
         } else if (connection === 'open') {
+            conn = connection;
             console.log('opened connection');
-            // let groups = Object.values(await sock.groupFetchAllParticipating());
-            // for (let group of groups) {
-            //     console.log('Group ID: ' + group.id + ' || Nama Group: ' + group.subject);
-            // }
+            updateQR('qrscanned');
             return;
         }
 
@@ -129,6 +155,20 @@ io.on('connection', async (socket) => {
 });
 
 // functions
+const deleteFolderRecursive = (folderPath) => {
+    if (fs.existsSync(folderPath)) {
+        fs.readdirSync(folderPath).forEach((file) => {
+            const curPath = path.join(folderPath, file);
+            if (fs.lstatSync(curPath).isDirectory()) {
+                deleteFolderRecursive(curPath);
+            } else {
+                fs.unlinkSync(curPath);
+            }
+        });
+        fs.rmdirSync(folderPath);
+    }
+};
+
 const isConnected = () => {
     return sock.user;
 };
@@ -158,13 +198,20 @@ const updateQR = (data) => {
     }
 };
 
-// send text message to wa user
 app.post('/send-message', async (req, res) => {
     const reqMessage = req.body.message;
     const reqPhone = req.body.phone;
     let whatsAppNumber;
 
     try {
+        if (conn !== 'open') {
+            res.status(500).json({
+                status: false,
+                response: 'Device is logged out',
+            });
+            return;
+        }
+
         if (!req.files) {
             if (reqMessage == undefined) {
                 res.status(500).json({
@@ -177,12 +224,18 @@ app.post('/send-message', async (req, res) => {
                     response: 'Nomor WA belum tidak disertakan!',
                 });
             } else {
-                whatsAppNumber = '62' + reqPhone.substring(1) + '@s.whatsapp.net';
+                whatsAppNumber =
+                    reqPhone.substring(0, 2) == '62'
+                        ? reqPhone + '@s.whatsapp.net'
+                        : '62' + reqPhone.substring(1) + '@s.whatsapp.net';
+
                 console.log(await sock.onWhatsApp(whatsAppNumber));
                 if (isConnected) {
                     const exists = await sock.onWhatsApp(whatsAppNumber);
                     if (exists?.jid || (exists && exists[0]?.jid)) {
-                        sock.sendMessage(exists.jid || exists[0].jid, { text: reqMessage })
+                        sock.sendMessage(exists.jid || exists[0].jid, {
+                            text: reqMessage,
+                        })
                             .then((result) => {
                                 res.status(200).json({
                                     status: true,
@@ -215,7 +268,11 @@ app.post('/send-message', async (req, res) => {
                     response: 'Nomor WA belum tidak disertakan!',
                 });
             } else {
-                whatsAppNumber = '62' + reqPhone.substring(1) + '@s.whatsapp.net';
+                whatsAppNumber =
+                    reqPhone.substring(0, 2) == '62'
+                        ? reqPhone + '@s.whatsapp.net'
+                        : '62' + reqPhone.substring(1) + '@s.whatsapp.net';
+
                 let reqFile = req.files.file;
                 var changeFileName = new Date().getTime() + '_' + reqFile.name;
                 reqFile.mv('./uploads/' + changeFileName);
@@ -245,9 +302,13 @@ app.post('/send-message', async (req, res) => {
                                         fs.unlink(fileName, (err) => {
                                             if (err && err.code == 'ENOENT') {
                                                 // file doens't exist
-                                                console.info("File doesn't exist, won't remove it.");
+                                                console.info(
+                                                    "File doesn't exist, won't remove it."
+                                                );
                                             } else if (err) {
-                                                console.error('Error occurred while trying to remove file.');
+                                                console.error(
+                                                    'Error occurred while trying to remove file.'
+                                                );
                                             }
                                             //console.log('File deleted!');
                                         });
@@ -269,7 +330,10 @@ app.post('/send-message', async (req, res) => {
                                     });
                                     console.log('pesan gagal terkirim');
                                 });
-                        } else if (extensionName === '.mp3' || extensionName === '.ogg') {
+                        } else if (
+                            extensionName === '.mp3' ||
+                            extensionName === '.ogg'
+                        ) {
                             await sock
                                 .sendMessage(exists.jid || exists[0].jid, {
                                     audio: {
@@ -283,9 +347,13 @@ app.post('/send-message', async (req, res) => {
                                         fs.unlink(fileName, (err) => {
                                             if (err && err.code == 'ENOENT') {
                                                 // file doens't exist
-                                                console.info("File doesn't exist, won't remove it.");
+                                                console.info(
+                                                    "File doesn't exist, won't remove it."
+                                                );
                                             } else if (err) {
-                                                console.error('Error occurred while trying to remove file.');
+                                                console.error(
+                                                    'Error occurred while trying to remove file.'
+                                                );
                                             }
                                             //console.log('File deleted!');
                                         });
@@ -322,9 +390,13 @@ app.post('/send-message', async (req, res) => {
                                         fs.unlink(fileName, (err) => {
                                             if (err && err.code == 'ENOENT') {
                                                 // file doens't exist
-                                                console.info("File doesn't exist, won't remove it.");
+                                                console.info(
+                                                    "File doesn't exist, won't remove it."
+                                                );
                                             } else if (err) {
-                                                console.error('Error occurred while trying to remove file.');
+                                                console.error(
+                                                    'Error occurred while trying to remove file.'
+                                                );
                                             }
                                             //console.log('File deleted!');
                                         });
@@ -367,13 +439,20 @@ app.post('/send-message', async (req, res) => {
     }
 });
 
-// send group message
 app.post('/send-group-message', async (req, res) => {
     const reqMessage = req.body.message;
     const reqGroupId = req.body.group_id;
     let whatsAppGroup;
 
     try {
+        if (conn !== 'open') {
+            res.status(500).json({
+                status: false,
+                response: 'Device is logged out',
+            });
+            return;
+        }
+
         if (isConnected) {
             if (!req.files) {
                 if (reqMessage == undefined) {
@@ -390,7 +469,10 @@ app.post('/send-group-message', async (req, res) => {
                     let whatsAppGroup = await sock.groupMetadata(reqGroupId);
                     console.log(whatsAppGroup.id);
                     console.log('isConnected');
-                    if (whatsAppGroup?.id || (whatsAppGroup && whatsAppGroup[0]?.id)) {
+                    if (
+                        whatsAppGroup?.id ||
+                        (whatsAppGroup && whatsAppGroup[0]?.id)
+                    ) {
                         sock.sendMessage(reqGroupId, { text: reqMessage })
                             .then((result) => {
                                 res.status(200).json({
@@ -426,13 +508,17 @@ app.post('/send-group-message', async (req, res) => {
                     console.log(whatsAppGroup.id);
 
                     let reqFile = req.files.file;
-                    var changeFileName = new Date().getTime() + '_' + reqFile.name;
+                    var changeFileName =
+                        new Date().getTime() + '_' + reqFile.name;
                     //pindahkan file ke dalam upload directory
                     reqFile.mv('./uploads/' + changeFileName);
                     let reqFileMime = reqFile.mimetype;
                     //console.log('Simpan document '+reqFileMime);
                     if (isConnected) {
-                        if (whatsAppGroup?.id || (whatsAppGroup && whatsAppGroup[0]?.id)) {
+                        if (
+                            whatsAppGroup?.id ||
+                            (whatsAppGroup && whatsAppGroup[0]?.id)
+                        ) {
                             let fileName = './uploads/' + changeFileName;
                             let extensionName = path.extname(fileName);
                             if (
@@ -442,20 +528,30 @@ app.post('/send-group-message', async (req, res) => {
                                 extensionName === '.gif'
                             ) {
                                 await sock
-                                    .sendMessage(whatsAppGroup.id || whatsAppGroup[0].id, {
-                                        image: {
-                                            url: fileName,
-                                        },
-                                        caption: reqMessage,
-                                    })
+                                    .sendMessage(
+                                        whatsAppGroup.id || whatsAppGroup[0].id,
+                                        {
+                                            image: {
+                                                url: fileName,
+                                            },
+                                            caption: reqMessage,
+                                        }
+                                    )
                                     .then((result) => {
                                         if (fs.existsSync(fileName)) {
                                             fs.unlink(fileName, (err) => {
-                                                if (err && err.code == 'ENOENT') {
+                                                if (
+                                                    err &&
+                                                    err.code == 'ENOENT'
+                                                ) {
                                                     // file doens't exist
-                                                    console.info("File doesn't exist, won't remove it.");
+                                                    console.info(
+                                                        "File doesn't exist, won't remove it."
+                                                    );
                                                 } else if (err) {
-                                                    console.error('Error occurred while trying to remove file.');
+                                                    console.error(
+                                                        'Error occurred while trying to remove file.'
+                                                    );
                                                 }
                                                 //console.log('File deleted!');
                                             });
@@ -477,23 +573,36 @@ app.post('/send-group-message', async (req, res) => {
                                         });
                                         console.log('pesan gagal terkirim');
                                     });
-                            } else if (extensionName === '.mp3' || extensionName === '.ogg') {
+                            } else if (
+                                extensionName === '.mp3' ||
+                                extensionName === '.ogg'
+                            ) {
                                 await sock
-                                    .sendMessage(whatsAppGroup.id || whatsAppGroup[0].id, {
-                                        audio: {
-                                            url: fileName,
-                                            caption: reqMessage,
-                                        },
-                                        mimetype: 'audio/mp4',
-                                    })
+                                    .sendMessage(
+                                        whatsAppGroup.id || whatsAppGroup[0].id,
+                                        {
+                                            audio: {
+                                                url: fileName,
+                                                caption: reqMessage,
+                                            },
+                                            mimetype: 'audio/mp4',
+                                        }
+                                    )
                                     .then((result) => {
                                         if (fs.existsSync(fileName)) {
                                             fs.unlink(fileName, (err) => {
-                                                if (err && err.code == 'ENOENT') {
+                                                if (
+                                                    err &&
+                                                    err.code == 'ENOENT'
+                                                ) {
                                                     // file doens't exist
-                                                    console.info("File doesn't exist, won't remove it.");
+                                                    console.info(
+                                                        "File doesn't exist, won't remove it."
+                                                    );
                                                 } else if (err) {
-                                                    console.error('Error occurred while trying to remove file.');
+                                                    console.error(
+                                                        'Error occurred while trying to remove file.'
+                                                    );
                                                 }
                                                 //console.log('File deleted!');
                                             });
@@ -517,31 +626,45 @@ app.post('/send-group-message', async (req, res) => {
                                     });
                             } else {
                                 await sock
-                                    .sendMessage(whatsAppGroup.id || whatsAppGroup[0].id, {
-                                        document: {
-                                            url: fileName,
-                                            caption: reqMessage,
-                                        },
-                                        mimetype: reqFileMime,
-                                        fileName: reqFile.name,
-                                    })
+                                    .sendMessage(
+                                        whatsAppGroup.id || whatsAppGroup[0].id,
+                                        {
+                                            document: {
+                                                url: fileName,
+                                                caption: reqMessage,
+                                            },
+                                            mimetype: reqFileMime,
+                                            fileName: reqFile.name,
+                                        }
+                                    )
                                     .then((result) => {
                                         if (fs.existsSync(fileName)) {
                                             fs.unlink(fileName, (err) => {
-                                                if (err && err.code == 'ENOENT') {
+                                                if (
+                                                    err &&
+                                                    err.code == 'ENOENT'
+                                                ) {
                                                     // file doens't exist
-                                                    console.info("File doesn't exist, won't remove it.");
+                                                    console.info(
+                                                        "File doesn't exist, won't remove it."
+                                                    );
                                                 } else if (err) {
-                                                    console.error('Error occurred while trying to remove file.');
+                                                    console.error(
+                                                        'Error occurred while trying to remove file.'
+                                                    );
                                                 }
                                                 //console.log('File deleted!');
                                             });
                                         }
 
                                         setTimeout(() => {
-                                            sock.sendMessage(whatsAppGroup.id || whatsAppGroup[0].id, {
-                                                text: reqMessage,
-                                            });
+                                            sock.sendMessage(
+                                                whatsAppGroup.id ||
+                                                    whatsAppGroup[0].id,
+                                                {
+                                                    text: reqMessage,
+                                                }
+                                            );
                                         }, 1000);
 
                                         res.send({
@@ -586,6 +709,39 @@ app.post('/send-group-message', async (req, res) => {
         }
 
         //end try
+    } catch (err) {
+        res.status(500).send(err);
+    }
+});
+
+app.post('/groups', async (req, res) => {
+    const reqToken = req.body.token;
+
+    try {
+        if (conn !== 'open') {
+            res.status(500).json({
+                status: false,
+                response: 'Device is logged out',
+            });
+            return;
+        }
+
+        if (reqToken !== 'DSM_2023;') {
+            res.status(500).json({
+                status: false,
+                response: 'The provided token is incorrect',
+            });
+            return;
+        }
+
+        let groups = Object.values(await sock.groupFetchAllParticipating());
+
+        res.status(200).json({
+            status: true,
+            response: 'Successfully get groups',
+            data: groups.map((data) => [data.subject, data.id]),
+        });
+        return;
     } catch (err) {
         res.status(500).send(err);
     }
